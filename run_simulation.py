@@ -14,7 +14,7 @@ FOOD_REACHED_COUNT = 0
 MAX_STEPS = 2000
 
 class TransformerAgent(nn.Module):
-    def __init__(self, input_size, num_actions, embed_size=64, num_heads=4, num_layers=2):
+    def __init__(self, input_size, num_actions, embed_size=32, num_heads=2, num_layers=1):
         super(TransformerAgent, self).__init__()
         self.embedding = nn.Linear(input_size, embed_size)
         encoder_layer = nn.TransformerEncoderLayer(d_model=embed_size, nhead=num_heads, batch_first=True)
@@ -26,7 +26,7 @@ class TransformerAgent(nn.Module):
         x = torch.mean(x, dim=1)
         logits = self.fc_out(x)
         return logits
-agent = TransformerAgent(input_size=10, num_actions=4)
+agent = TransformerAgent(input_size=6, num_actions=4)  # Adjusted input size to 6
 optimizer = optim.Adam(agent.parameters(), lr=0.001)
 screen = None
 clock = None
@@ -34,12 +34,12 @@ actions = {0: np.array([0, -1]), 1: np.array([0, 1]), 2: np.array([-1, 0]), 3: n
 
 def calculate_reward(old_pos, new_pos, food_pos, poison_wall):
     if tuple(new_pos) in poison_wall:
-        print('Stepped on poison wall----------------------------------')
-        return -80
+        print('--------------------Stepped on poison wall--------------------')
+        return -50
     old_dist = np.linalg.norm(old_pos - food_pos)
     new_dist = np.linalg.norm(new_pos - food_pos)
     if np.array_equal(new_pos, food_pos):
-        return 60
+        return 50
     else:
         distance_change = old_dist - new_dist
         if distance_change > 0:
@@ -66,11 +66,17 @@ for episode in range(MAX_EPISODES):
                     pygame.quit()
                     sys.exit()
         rel_food_pos = (food_pos - player_pos) / GRID_SIZE
-        rel_poison_wall = [((pos[0] - player_pos[0]) / GRID_SIZE, (pos[1] - player_pos[1]) / GRID_SIZE) for pos in poison_wall]
-        flattened_poison = [coord for pos in rel_poison_wall for coord in pos]
+        if poison_wall:
+            closest_poison = min(poison_wall, key=lambda pos: np.linalg.norm(player_pos - pos))
+            rel_poison_x = (closest_poison[0] - player_pos[0]) / GRID_SIZE
+            rel_poison_y = (closest_poison[1] - player_pos[1]) / GRID_SIZE
+            distance_to_poison = calculate_distance_feature(player_pos, closest_poison)
+        else:
+            rel_poison_x = 0
+            rel_poison_y = 0
+            distance_to_poison = 0
         distance_to_food = calculate_distance_feature(player_pos, food_pos)
-        distance_to_poison = min([calculate_distance_feature(player_pos, pos) for pos in poison_wall]) if poison_wall else 0
-        state = np.concatenate((rel_food_pos, flattened_poison, [distance_to_food, distance_to_poison]))
+        state = np.concatenate((rel_food_pos, [rel_poison_x, rel_poison_y, distance_to_poison, distance_to_food]))
         state_tensor = torch.tensor(state, dtype=torch.float32).unsqueeze(0).unsqueeze(1)
         logits = agent(state_tensor)
         action_probs = torch.softmax(logits, dim=-1)
