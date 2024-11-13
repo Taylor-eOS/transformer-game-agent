@@ -5,18 +5,20 @@ import torch.optim as optim
 import numpy as np
 import random
 from collections import deque
+from collections import namedtuple
 
+DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 GRID_SIZE = 3
 TEST_MODE = False
-EPOCHS = 1 if TEST_MODE else 50
-TRAINING_STEPS = 1 if TEST_MODE else 100
+EVALUATION = True
+EPOCHS = 1 if TEST_MODE else 200
+TRAIN_STEPS = 1 if TEST_MODE else 100
 MAX_AGENT_STEPS = 10
 NUM_VAL_TESTS = 100
 SEQUENCE_LENGTH = 5
-INPUT_SIZE = 7
-LAYERS = 2
 EMBED_SIZE = 32
-DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+LAYERS = 2
+INPUT_SIZE = 11
 
 class TransformerModel(nn.Module):
     def __init__(self, input_size=INPUT_SIZE, sequence_length=SEQUENCE_LENGTH, num_actions=4, embed_size=EMBED_SIZE, num_heads=2, num_layers=LAYERS):
@@ -40,6 +42,21 @@ class GridEnv:
         self.grid_size = GRID_SIZE
         self.reset()
 
+    def get_state(self, position):
+        state = np.zeros(INPUT_SIZE, dtype=np.float32)
+        state[0] = position
+        state[1] = self.food_pos[0]
+        state[2] = self.food_pos[1]
+        state[3] = self.poison_pos[0]
+        state[4] = self.poison_pos[1]
+        state[5] = self.agent_pos[0]
+        state[6] = self.agent_pos[1]
+        state[7] = self.food_pos[0] - self.agent_pos[0]
+        state[8] = self.food_pos[1] - self.agent_pos[1]
+        state[9] = self.poison_pos[0] - self.agent_pos[0]
+        state[10] = self.poison_pos[1] - self.agent_pos[1]
+        return state
+
     def reset(self):
         positions = [(i, j) for i in range(self.grid_size) for j in range(self.grid_size)]
         self.agent_pos = random.choice(positions)
@@ -49,17 +66,6 @@ class GridEnv:
         self.poison_pos = random.choice(positions)
         self.previous_pos = None
         return self.get_state(0)
-
-    def get_state(self, position):
-        state = np.zeros(INPUT_SIZE, dtype=np.float32)
-        state[0] = self.food_pos[0]
-        state[1] = self.food_pos[1]
-        state[2] = self.poison_pos[0]
-        state[3] = self.poison_pos[1]
-        state[4] = self.agent_pos[0]
-        state[5] = self.agent_pos[1]
-        state[6] = position
-        return state
 
     def step(self, action, position):
         self.previous_pos = self.agent_pos
@@ -75,34 +81,23 @@ class GridEnv:
         self.agent_pos = (new_row, new_col)
         reward, done = self.calculate_reward(action)
         if self.agent_pos == self.food_pos:
-            reward += 4.0
+            reward += 3.0
             done = True
         elif self.agent_pos == self.poison_pos:
-            reward -= 3.0
+            reward -= 2.0
             done = True
         return self.get_state(position), reward, done
 
     def calculate_reward(self, action):
         reward = -0.1
-        reward += self.step_back_penalty()
-        reward += self.direction_reward(action)
+        #reward += self.step_back_penalty()
         return reward, False
 
     def step_back_penalty(self):
         if self.previous_pos and self.agent_pos == self.previous_pos:
             #if TEST_MODE: print('Back step')
-            return -0.8
+            return -0.2
         return 0.0
-
-    def direction_reward(self, action):
-        reward = 0.0
-        food_dir = get_direction(self.agent_pos, self.food_pos)
-        poison_dir = get_direction(self.agent_pos, self.poison_pos)
-        if action == food_dir and not action == poison_dir:
-            reward += 0.1
-        elif action == poison_dir and not action == food_dir:
-            reward -= 0.1
-        return reward
 
 def get_action_mask(agent_pos, grid_size):
     mask = torch.zeros(1,4)
@@ -117,17 +112,6 @@ def get_action_mask(agent_pos, grid_size):
         mask[0,3] = -1e9
     return mask
 
-def get_direction(current, target):
-    if target[0] < current[0]:
-        return 0
-    elif target[0] > current[0]:
-        return 1
-    elif target[1] < current[1]:
-        return 2
-    elif target[1] > current[1]:
-        return 3
-    return -1
-
 def generate_sequence(sequence_length=SEQUENCE_LENGTH):
     sequence = [random.randint(0,3) for _ in range(sequence_length)]
     if TEST_MODE: print(sequence)
@@ -136,16 +120,13 @@ def generate_sequence(sequence_length=SEQUENCE_LENGTH):
 def train():
     env = GridEnv()
     model = TransformerModel().to(DEVICE)
-    optimizer = optim.Adam(model.parameters(), lr=0.0001)
+    optimizer = optim.Adam(model.parameters(), lr=0.000001)
     for epoch in range(EPOCHS):
         total_loss = 0.0
         loss_count = 0
-        positive_count = 0
-        negative_count = 0
-        for _ in range(TRAINING_STEPS):
+        for _ in range(TRAIN_STEPS):
             state = env.reset()
             memory = deque([env.get_state(i) for i in range(SEQUENCE_LENGTH)], maxlen=SEQUENCE_LENGTH)
-            #if TEST_MODE: print(memory)
             sequence = generate_sequence(SEQUENCE_LENGTH)
             G = 0.0
             log_probs = []
@@ -156,30 +137,28 @@ def train():
                 probs = torch.softmax(output, dim=1)
                 mask = get_action_mask(env.agent_pos, env.grid_size).to(DEVICE)
                 masked_probs = probs + mask
-                log_prob = torch.log(masked_probs[0, action])
+                action_prob = masked_probs[0, action]
+                log_prob = torch.log(action_prob)
                 log_probs.append(log_prob)
                 next_state, reward, done = env.step(action, idx)
                 G += reward
-                memory.append(env.get_state(idx))
+                memory.append(next_state)
                 if done:
                     break
             for log_prob in log_probs:
                 total_loss += -log_prob * G
                 loss_count += 1
-            if G > 0:
-                positive_count += 1
-            elif G < 0:
-                negative_count += 1
         if loss_count > 0:
             total_loss = total_loss / loss_count
             total_loss.backward()
             optimizer.step()
             optimizer.zero_grad()
-            print(f"{epoch +1}/{EPOCHS} - {positive_count}")
+            print(f"{epoch +1}/{EPOCHS}")
         else:
             print(f"{epoch +1}/{EPOCHS} - No updates")
-        #if epoch % (EPOCHS // 10) == 0:
-        #    run_tests(10)
+        if EVALUATION and epoch % (EPOCHS // 10) == 0 and not epoch > EPOCHS - 9:
+            torch.save(model.state_dict(), "model.pth")
+            run_tests(50)
     torch.save(model.state_dict(), "model.pth")
     if not TEST_MODE:
         run_tests(100)
@@ -209,14 +188,14 @@ def run_tests(num_val_tests=NUM_VAL_TESTS):
                 action = torch.argmax(masked_probs, dim=1).item()
             next_state, reward, done = env.step(action, idx % SEQUENCE_LENGTH)
             agent_pos = env.agent_pos
-            memory.append(env.get_state(idx % SEQUENCE_LENGTH))
+            memory.append(next_state)
             if done:
                 if agent_pos == food_pos:
                     total_successes += 1
                 elif agent_pos == poison_pos:
                     total_poisons += 1
                 break
-    print(f"Successes: {total_successes}, Fails: {total_poisons} ({num_val_tests} tests)")
+    print(f"{total_successes} successes, {total_poisons} fails, {num_val_tests} tests, {total_successes / num_val_tests * 100:.0f}%")
 
 def run_single():
     env = GridEnv()
@@ -239,7 +218,7 @@ def run_single():
             action = torch.argmax(masked_probs, dim=1).item()
         next_state, reward, done = env.step(action, step_count % SEQUENCE_LENGTH)
         agent_pos = env.agent_pos
-        memory.append(env.get_state(step_count % SEQUENCE_LENGTH))
+        memory.append(next_state)
         print(f"{action_map[action]}: {agent_pos}")
         if agent_pos == env.food_pos:
             print("Found food!")
@@ -249,7 +228,7 @@ def run_single():
             done = True
         step_count += 1
     if not done:
-        print("Maximum steps reached without finding anything.")
+        print("Maximum steps reached without stepping on anything.")
 
 def main():
     parser = argparse.ArgumentParser()
@@ -265,3 +244,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
