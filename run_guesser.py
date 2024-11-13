@@ -1,14 +1,15 @@
+import argparse
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import numpy as np
-import argparse
 import random
 from collections import deque
 
 GRID_SIZE = 3
-EPOCHS = 50
-TRAINING_STEPS = 100
+TEST_MODE = False
+EPOCHS = 1 if TEST_MODE else 50
+TRAINING_STEPS = 1 if TEST_MODE else 100
 MAX_AGENT_STEPS = 10
 NUM_VAL_TESTS = 100
 SEQUENCE_LENGTH = 5
@@ -50,7 +51,7 @@ class GridEnv:
         return self.get_state(0)
 
     def get_state(self, position):
-        state = np.zeros(7, dtype=np.float32)
+        state = np.zeros(INPUT_SIZE, dtype=np.float32)
         state[0] = self.food_pos[0]
         state[1] = self.food_pos[1]
         state[2] = self.poison_pos[0]
@@ -77,32 +78,20 @@ class GridEnv:
             reward += 4.0
             done = True
         elif self.agent_pos == self.poison_pos:
-            reward -= 2.0
+            reward -= 3.0
             done = True
         return self.get_state(position), reward, done
 
     def calculate_reward(self, action):
-        reward = self.step_penalty()
-        reward += self.stay_penalty()
+        reward = -0.1
+        reward += self.step_back_penalty()
         reward += self.direction_reward(action)
         return reward, False
 
-    def step_reward(self, action):
-        reward = 0.0
-        food_dir = get_direction(self.agent_pos, self.food_pos)
-        poison_dir = get_direction(self.agent_pos, self.poison_pos)
-        if action == food_dir:
-            reward += 0.2
-        elif action == poison_dir:
-            reward -= 0.2
-        return reward
-
-    def step_penalty(self):
-        return -0.1
-
-    def stay_penalty(self):
+    def step_back_penalty(self):
         if self.previous_pos and self.agent_pos == self.previous_pos:
-            return -0.1
+            #if TEST_MODE: print('Back step')
+            return -0.8
         return 0.0
 
     def direction_reward(self, action):
@@ -110,9 +99,9 @@ class GridEnv:
         food_dir = get_direction(self.agent_pos, self.food_pos)
         poison_dir = get_direction(self.agent_pos, self.poison_pos)
         if action == food_dir and not action == poison_dir:
-            reward += 0.3
+            reward += 0.1
         elif action == poison_dir and not action == food_dir:
-            reward -= 0.3
+            reward -= 0.1
         return reward
 
 def get_action_mask(agent_pos, grid_size):
@@ -140,7 +129,9 @@ def get_direction(current, target):
     return -1
 
 def generate_sequence(sequence_length=SEQUENCE_LENGTH):
-    return [random.randint(0,3) for _ in range(sequence_length)]
+    sequence = [random.randint(0,3) for _ in range(sequence_length)]
+    if TEST_MODE: print(sequence)
+    return sequence
 
 def train():
     env = GridEnv()
@@ -154,6 +145,7 @@ def train():
         for _ in range(TRAINING_STEPS):
             state = env.reset()
             memory = deque([env.get_state(i) for i in range(SEQUENCE_LENGTH)], maxlen=SEQUENCE_LENGTH)
+            #if TEST_MODE: print(memory)
             sequence = generate_sequence(SEQUENCE_LENGTH)
             G = 0.0
             log_probs = []
@@ -189,7 +181,8 @@ def train():
         #if epoch % (EPOCHS // 10) == 0:
         #    run_tests(10)
     torch.save(model.state_dict(), "model.pth")
-    run_tests(100)
+    if not TEST_MODE:
+        run_tests(100)
 
 def run_tests(num_val_tests=NUM_VAL_TESTS):
     env = GridEnv()
@@ -272,4 +265,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
