@@ -11,18 +11,17 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 GRID_SIZE = 3
 TEST_MODE = False
 EVALUATION = True
-EPOCHS = 1 if TEST_MODE else 64
-TRAIN_STEPS = 1 if TEST_MODE else 512
-BATCH_SIZE = 32
+EPOCHS = 1 if TEST_MODE else 512
+TRAIN_STEPS = 1 if TEST_MODE else 128
+BATCH_SIZE = 1 if TEST_MODE else 32
 MAX_AGENT_STEPS = 10
 NUM_VAL_TESTS = 100
-EMBED_SIZE = 32
 SEQUENCE_LENGTH = 5
 INPUT_SIZE = 4
-LEARNING_RATE = 0.0001
+LEARNING_RATE = 0.00001
 
 class TransformerModel(nn.Module):
-    def __init__(self, input_size=INPUT_SIZE, seq=SEQUENCE_LENGTH * 3, num_actions=4, embed_size=EMBED_SIZE, num_heads=2, num_layers=2):
+    def __init__(self, input_size=INPUT_SIZE, seq=SEQUENCE_LENGTH * 3, num_actions=4, embed_size=32, num_heads=2, num_layers=2):
         super(TransformerModel, self).__init__()
         self.embedding = nn.Linear(input_size, embed_size)
         self.positional_encoding = nn.Parameter(torch.zeros(1, seq, embed_size))
@@ -96,7 +95,7 @@ class GridEnv:
         return reward, False
 
 def get_action_mask(agent_pos, grid_size):
-    mask = torch.zeros(1, 4).to(DEVICE)  # Ensure mask is on DEVICE
+    mask = torch.zeros(1, 4).to(DEVICE)
     row, col = agent_pos
     if row == 0:
         mask[0, 0] = -1e9
@@ -108,10 +107,6 @@ def get_action_mask(agent_pos, grid_size):
         mask[0, 3] = -1e9
     return mask
 
-def generate_sequence(sequence_length=SEQUENCE_LENGTH):
-    sequence = [random.randint(0,3) for _ in range(sequence_length)]
-    return sequence
-
 def train():
     env = GridEnv()
     model = TransformerModel().to(DEVICE)
@@ -121,45 +116,62 @@ def train():
         loss_count = 0
         batches = TRAIN_STEPS // BATCH_SIZE
         positive_count = 0
+        random_exploration = epoch % (EPOCHS // 10) == 0
         for _ in range(batches):
             batch_log_probs = []
             batch_returns = []
             for _ in range(BATCH_SIZE):
                 memory = env.reset()
-                sequence = generate_sequence(SEQUENCE_LENGTH)
                 G = 0.0
                 log_probs = []
+                rewards = []
                 done = False
-                for idx, action in enumerate(sequence):
+                if random_exploration:
+                    sequence = [random.randint(0, 3) for _ in range(SEQUENCE_LENGTH)]
+                for idx in range(SEQUENCE_LENGTH):
                     state_tensor = torch.tensor(np.array(memory), dtype=torch.float32).unsqueeze(0).to(DEVICE)
-                    output = model(state_tensor)
-                    mask = get_action_mask(env.agent_pos, env.grid_size).to(DEVICE)
-                    masked_output = output + mask
-                    probs = torch.softmax(masked_output, dim=1)
-                    action_prob = probs[0, action]
-                    log_prob = torch.log(action_prob + 1e-8)
-                    log_probs.append(log_prob)
+                    if random_exploration:
+                        action = sequence[idx]
+                    else:
+                        output = model(state_tensor)
+                        mask = get_action_mask(env.agent_pos, env.grid_size).to(DEVICE)
+                        masked_output = output + mask
+                        probs = torch.softmax(masked_output, dim=1)
+                        action = torch.multinomial(probs, 1).item()
+                        log_prob = torch.log(probs[0, action] + 1e-8)
+                        log_probs.append(log_prob)
                     next_state, reward, done = env.step(action, idx)
                     G += reward
                     memory.extend(next_state)
+                    rewards.append(reward)
                     if done:
                         break
-                batch_log_probs.extend(log_probs)
-                batch_returns.append(G)
-            loss = -torch.stack(batch_log_probs).mean() * torch.tensor(batch_returns).mean()
-            total_loss += loss.item()
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-            loss_count += 1
-            if G > 0:
-                positive_count += 1
+                returns = []
+                G = 0
+                for reward in reversed(rewards):
+                    G = reward + G * 0.9
+                    returns.insert(0, G)
+                if not random_exploration:
+                    batch_log_probs.extend(log_probs)
+                    batch_returns.extend(returns)
+            if not random_exploration and batch_log_probs:
+                batch_log_probs = torch.stack(batch_log_probs).to(DEVICE)
+                batch_returns = torch.tensor(batch_returns, dtype=torch.float32).to(DEVICE)
+                batch_returns = (batch_returns - batch_returns.mean()) / (batch_returns.std() + 1e-8)
+                loss = -(batch_log_probs * batch_returns).mean()
+                total_loss += loss.item()
+                loss.backward()
+                optimizer.step()
+                optimizer.zero_grad()
+                loss_count += 1
+                if G > 0:
+                    positive_count += 1
         if loss_count > 0:
             average_loss = total_loss / loss_count
-            print(f"{epoch +1}/{EPOCHS} - {positive_count} - {average_loss:.2f}")
+            print(f"{epoch + 1}/{EPOCHS} - Positives: {positive_count} - Average Loss: {average_loss:.2f}")
         else:
-            print(f"{epoch +1}/{EPOCHS} - No updates")
-        if EVALUATION and not TEST_MODE and epoch % (EPOCHS // 10) == 0 and not epoch > EPOCHS - 9:
+            print(f"{epoch + 1}/{EPOCHS} - No updates")
+        if EVALUATION and not TEST_MODE and epoch % 10 == 0 and epoch < EPOCHS - 9:
             torch.save(model.state_dict(), "model.pth")
             run_tests(100)
     torch.save(model.state_dict(), "model.pth")
@@ -230,14 +242,15 @@ def run_single():
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--t', action='store_true')
-    parser.add_argument('--s', action='store_true')
+    parser.add_argument('-t', action='store_true', help="Train the model")
+    parser.add_argument('-s', action='store_true', help="Run single instance")
+    parser.add_argument('-e', action='store_true', help="Evaluate")
     args = parser.parse_args()
     if args.t:
         train()
     elif args.s:
         run_single()
-    else:
+    elif args.e:
         run_tests()
 
 if __name__ == "__main__":
