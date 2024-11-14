@@ -11,14 +11,16 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 GRID_SIZE = 3
 TEST_MODE = False
 EVALUATION = True
-EPOCHS = 1 if TEST_MODE else 512
-TRAIN_STEPS = 1 if TEST_MODE else 128
-BATCH_SIZE = 1 if TEST_MODE else 32
+EPOCHS = 2 if TEST_MODE else 512
+TRAIN_STEPS = 2 if TEST_MODE else 128
+BATCH_SIZE = 2 if TEST_MODE else 32
 MAX_AGENT_STEPS = 10
 NUM_VAL_TESTS = 100
 SEQUENCE_LENGTH = 5
 INPUT_SIZE = 4
 LEARNING_RATE = 0.00001
+GAMMA = 0.9
+VALIDATION_STEPS = 8
 
 class TransformerModel(nn.Module):
     def __init__(self, input_size=INPUT_SIZE, seq=SEQUENCE_LENGTH * 3, num_actions=4, embed_size=32, num_heads=2, num_layers=2):
@@ -87,7 +89,6 @@ class GridEnv:
             reward -= 2.0
             done = True
         next_state = self.get_state(position)
-        #print(reward)
         return next_state, reward, done
 
     def calculate_reward(self, action):
@@ -111,12 +112,13 @@ def train():
     env = GridEnv()
     model = TransformerModel().to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
+    validation_sample = 50
     for epoch in range(EPOCHS):
         total_loss = 0.0
         loss_count = 0
         batches = TRAIN_STEPS // BATCH_SIZE
         positive_count = 0
-        random_exploration = epoch % (EPOCHS // 10) == 0
+        random_exploration = False if TEST_MODE else epoch % (EPOCHS // 10) == 0
         for _ in range(batches):
             batch_log_probs = []
             batch_returns = []
@@ -148,8 +150,8 @@ def train():
                         break
                 returns = []
                 G = 0
-                for reward in reversed(rewards):
-                    G = reward + G * 0.9
+                for reward in reversed(rewards[:len(log_probs)]):
+                    G = reward + G * GAMMA
                     returns.insert(0, G)
                 if not random_exploration:
                     batch_log_probs.extend(log_probs)
@@ -157,7 +159,8 @@ def train():
             if not random_exploration and batch_log_probs:
                 batch_log_probs = torch.stack(batch_log_probs).to(DEVICE)
                 batch_returns = torch.tensor(batch_returns, dtype=torch.float32).to(DEVICE)
-                batch_returns = (batch_returns - batch_returns.mean()) / (batch_returns.std() + 1e-8)
+                std = batch_returns.std(unbiased=False)
+                batch_returns = (batch_returns - batch_returns.mean()) / (std + 1e-6)
                 loss = -(batch_log_probs * batch_returns).mean()
                 total_loss += loss.item()
                 loss.backward()
@@ -168,15 +171,52 @@ def train():
                     positive_count += 1
         if loss_count > 0:
             average_loss = total_loss / loss_count
-            print(f"{epoch + 1}/{EPOCHS} - Positives: {positive_count} - Average Loss: {average_loss:.2f}")
+            print(f"{epoch + 1}/{EPOCHS} - Positives: {positive_count} - Training loss: {average_loss:.4f}")
         else:
             print(f"{epoch + 1}/{EPOCHS} - No updates")
-        if EVALUATION and not TEST_MODE and epoch % 10 == 0 and epoch < EPOCHS - 9:
-            torch.save(model.state_dict(), "model.pth")
-            run_tests(100)
+        if epoch % VALIDATION_STEPS == 0:
+            model.eval()
+            validation_loss = 0.0
+            successes = 0
+            for _ in range(validation_sample):
+                memory = env.reset()
+                G = 0.0
+                log_probs = []
+                rewards = []
+                done = False
+                for idx in range(SEQUENCE_LENGTH):
+                    state_tensor = torch.tensor(np.array(memory), dtype=torch.float32).unsqueeze(0).to(DEVICE)
+                    output = model(state_tensor)
+                    mask = get_action_mask(env.agent_pos, env.grid_size).to(DEVICE)
+                    masked_output = output + mask
+                    probs = torch.softmax(masked_output, dim=1)
+                    action = torch.argmax(probs, dim=1).item()
+                    log_prob = torch.log(probs[0, action] + 1e-8)
+                    log_probs.append(log_prob)
+                    next_state, reward, done = env.step(action, idx)
+                    G += reward
+                    memory.extend(next_state)
+                    rewards.append(reward)
+                    if done:
+                        if env.agent_pos == env.food_pos:
+                            successes += 1
+                        break
+                returns = []
+                G = 0
+                for reward in reversed(rewards[:len(log_probs)]):
+                    G = reward + G * GAMMA
+                    returns.insert(0, G)
+                returns = torch.tensor(returns, dtype=torch.float32).to(DEVICE)
+                std = returns.std(unbiased=False)
+                returns = (returns - returns.mean()) / (std + 1e-6)
+                log_probs = torch.stack(log_probs).to(DEVICE)
+                val_loss = -(log_probs * returns).mean()
+                validation_loss += val_loss.item()
+            validation_loss /= validation_sample
+            accuracy = successes / validation_sample * 100
+            print(f"Validation loss: {validation_loss:.4f} - Validation accuracy: {accuracy:.2f}%")
+            model.train()
     torch.save(model.state_dict(), "model.pth")
-    if not TEST_MODE:
-        run_tests(100)
 
 def run_tests(num_val_tests=NUM_VAL_TESTS):
     env = GridEnv()
