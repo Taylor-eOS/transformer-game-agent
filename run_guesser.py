@@ -11,19 +11,19 @@ DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 GRID_SIZE = 3
 TEST_MODE = False
 EVALUATION = True
-EPOCHS = 2 if TEST_MODE else 512
+EPOCHS = 2 if TEST_MODE else 8192
 TRAIN_STEPS = 2 if TEST_MODE else 128
-BATCH_SIZE = 2 if TEST_MODE else 32
+BATCH_SIZE = 2 if TEST_MODE else 64
 MAX_AGENT_STEPS = 10
 NUM_VAL_TESTS = 100
 SEQUENCE_LENGTH = 5
-INPUT_SIZE = 4
+STATE_VECTORS = 4
+VECTOR_DIMENSION = 3
 LEARNING_RATE = 0.00001
-GAMMA = 0.9
-VALIDATION_STEPS = 8
+GAMMA = 0.999
 
 class TransformerModel(nn.Module):
-    def __init__(self, input_size=INPUT_SIZE, seq=SEQUENCE_LENGTH * 3, num_actions=4, embed_size=32, num_heads=2, num_layers=2):
+    def __init__(self, input_size=VECTOR_DIMENSION, seq=SEQUENCE_LENGTH * STATE_VECTORS, num_actions=4, embed_size=16, num_heads=2, num_layers=3):
         super(TransformerModel, self).__init__()
         self.embedding = nn.Linear(input_size, embed_size)
         self.positional_encoding = nn.Parameter(torch.zeros(1, seq, embed_size))
@@ -49,12 +49,15 @@ class GridEnv:
 
     def get_state(self, position):
         state = []
-        norm_x, norm_y = self.normalize_position(self.agent_pos)
-        state.append([position, 0, norm_x, norm_y])
-        norm_x, norm_y = self.normalize_position(self.food_pos)
-        state.append([position, 1, norm_x, norm_y])
-        norm_x, norm_y = self.normalize_position(self.poison_pos)
-        state.append([position, 2, norm_x, norm_y])
+        agent_x, agent_y = self.agent_pos
+        food_dx, food_dy = self.food_pos[0] - agent_x, self.food_pos[1] - agent_y
+        poison_dx, poison_dy = self.poison_pos[0] - agent_x, self.poison_pos[1] - agent_y
+        norm_food_dx, norm_food_dy = food_dx / (self.grid_size - 1), food_dy / (self.grid_size - 1)
+        norm_poison_dx, norm_poison_dy = poison_dx / (self.grid_size - 1), poison_dy / (self.grid_size - 1)
+        state.append([position, 1, norm_food_dx])
+        state.append([position, 1, norm_food_dy])
+        state.append([position, 2, norm_poison_dx])
+        state.append([position, 2, norm_poison_dy])
         return np.array(state, dtype=np.float32)
 
     def reset(self):
@@ -67,7 +70,7 @@ class GridEnv:
         self.previous_pos = None
         initial_states = [self.get_state(0) for _ in range(SEQUENCE_LENGTH)]
         flat_initial_states = [vec for state in initial_states for vec in state]
-        return deque(flat_initial_states, maxlen=SEQUENCE_LENGTH * 3)
+        return deque(flat_initial_states, maxlen=SEQUENCE_LENGTH * STATE_VECTORS)
 
     def step(self, action, position):
         self.previous_pos = self.agent_pos
@@ -83,10 +86,10 @@ class GridEnv:
         self.agent_pos = (new_row, new_col)
         reward, done = self.calculate_reward(action)
         if self.agent_pos == self.food_pos:
-            reward += 3.0
+            reward += 4.0
             done = True
         elif self.agent_pos == self.poison_pos:
-            reward -= 2.0
+            reward -= 3.0
             done = True
         next_state = self.get_state(position)
         return next_state, reward, done
@@ -112,7 +115,7 @@ def train():
     env = GridEnv()
     model = TransformerModel().to(DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=LEARNING_RATE)
-    validation_sample = 50
+    validation_samples = 100
     for epoch in range(EPOCHS):
         total_loss = 0.0
         loss_count = 0
@@ -174,11 +177,11 @@ def train():
             print(f"{epoch + 1}/{EPOCHS} - Positives: {positive_count} - Training loss: {average_loss:.4f}")
         else:
             print(f"{epoch + 1}/{EPOCHS} - No updates")
-        if epoch % VALIDATION_STEPS == 0:
+        if epoch % 10 == 0:
             model.eval()
             validation_loss = 0.0
             successes = 0
-            for _ in range(validation_sample):
+            for _ in range(validation_samples):
                 memory = env.reset()
                 G = 0.0
                 log_probs = []
@@ -212,9 +215,9 @@ def train():
                 log_probs = torch.stack(log_probs).to(DEVICE)
                 val_loss = -(log_probs * returns).mean()
                 validation_loss += val_loss.item()
-            validation_loss /= validation_sample
-            accuracy = successes / validation_sample * 100
-            print(f"Validation loss: {validation_loss:.4f} - Validation accuracy: {accuracy:.2f}%")
+            validation_loss /= validation_samples
+            accuracy = successes / validation_samples * 100
+            print(f"Validation loss: {validation_loss:.4f} - Validation accuracy: {accuracy:.0f}%")
             model.train()
     torch.save(model.state_dict(), "model.pth")
 
@@ -292,6 +295,8 @@ def main():
         run_single()
     elif args.e:
         run_tests()
+    else:
+        print('Launch the file with one of the arguments: -t, -s, or -e.')
 
 if __name__ == "__main__":
     main()
