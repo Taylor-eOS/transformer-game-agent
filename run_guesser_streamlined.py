@@ -49,15 +49,15 @@ class GridEnv:
 
     def get_state(self, position):
         state = []
-        norm_x, norm_y = self.normalize_position(self.agent_pos)
-        state.append([position, 0, norm_x])
-        state.append([position, 0, norm_y])
-        norm_x, norm_y = self.normalize_position(self.food_pos)
-        state.append([position, 1, norm_x])
-        state.append([position, 1, norm_y])
-        norm_x, norm_y = self.normalize_position(self.poison_pos)
-        state.append([position, 2, norm_x])
-        state.append([position, 2, norm_y])
+        agent_x, agent_y = self.agent_pos
+        food_dx, food_dy = self.food_pos[0] - agent_x, self.food_pos[1] - agent_y
+        poison_dx, poison_dy = self.poison_pos[0] - agent_x, self.poison_pos[1] - agent_y
+        norm_food_dx, norm_food_dy = food_dx / (self.grid_size - 1), food_dy / (self.grid_size - 1)
+        norm_poison_dx, norm_poison_dy = poison_dx / (self.grid_size - 1), poison_dy / (self.grid_size - 1)
+        state.append([position, 1, norm_food_dx])
+        state.append([position, 1, norm_food_dy])
+        state.append([position, 2, norm_poison_dx])
+        state.append([position, 2, norm_poison_dy])
         return np.array(state, dtype=np.float32)
 
     def reset(self):
